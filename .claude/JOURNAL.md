@@ -1,0 +1,11 @@
+# Claude Code Journal
+
+This journal tracks substantive work on documents, diagrams, and documentation content.
+
+---
+
+1. **Task - Project initialization** (v0.1.0): Created new JupyterLab extension project `jupyterlab_restore_terminals_fix` from copier template with full Claude Code configuration<br>
+    **Result**: Scaffolded extension from copier template with TypeScript frontend and Python server extension targeting JupyterLab >= 4.0.0. Updated `.claude/CLAUDE.md` with project-specific config importing workspace rules, added Makefile version sync rule against `@utils/jupyterlab-extensions/Makefile` (currently v1.32), package-lock.json tracking mandate, and required workspace skills section referencing `jupyterlab-extension` and `playwright`. Rewrote `README.md` with standardized badges (GitHub Actions, npm, PyPI, pepy, JupyterLab 4, KOLOMOLO, PayPal), feature list inspired by `jupyterlab_terminal_show_in_file_browser_extension`, and trimmed content below Uninstall section. Added `.nodeenv/` to `.gitignore`. Initialized git repository with `git init -b main` and committed all artefacts.
+
+2. **Task - Core extension implementation** (v0.1.0): Implemented terminal cwd save/restore logic in both server and frontend<br>
+    **Result**: Replaced scaffold `routes.py` with full cwd detection adapted from sibling `jupyterlab_terminal_show_in_file_browser_extension` - process tree traversal via `/proc/{pid}/cwd` (Linux) and `lsof` (macOS), deepest shell prioritisation, pseudo-filesystem filtering. Two endpoints: `GET /cwd/{name}` for single terminal, `GET /cwds` bulk endpoint for periodic polling. Frontend `src/index.ts` uses `IStateDB` to persist terminal cwds across restarts and `ITerminalTracker` for widget enumeration. Save phase: captures cwd on `widgetAdded` signal plus 15s interval poll of all terminals. Restore phase: after `app.restored`, sends `cd` command via `session.send()` for each terminal with a saved cwd. Added `@jupyterlab/statedb` and `@jupyterlab/terminal` dependencies. Fixed `terminal_manager.get_terminal()` auto-creation by checking `terminals` dict directly. Updated `jest.config.js` with `color`/`color-string`/`color-name` ESM transforms. All tests pass - 3 Jest, 2 pytest.

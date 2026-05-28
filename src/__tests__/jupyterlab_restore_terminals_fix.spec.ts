@@ -1,9 +1,16 @@
-/**
- * Example of [Jest](https://jestjs.io/docs/getting-started) unit tests
- */
+import plugin from '../index';
 
 describe('jupyterlab_restore_terminals_fix', () => {
-  it('should be tested', () => {
-    expect(1 + 1).toEqual(2);
+  it('should export a plugin with correct id', () => {
+    expect(plugin.id).toBe('jupyterlab_restore_terminals_fix:plugin');
+  });
+
+  it('should require IStateDB', () => {
+    expect(plugin.requires).toBeDefined();
+    expect(plugin.requires!.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should have autoStart enabled', () => {
+    expect(plugin.autoStart).toBe(true);
   });
 });
