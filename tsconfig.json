@@ -12,6 +12,7 @@
     "noEmitOnError": true,
     "noImplicitAny": true,
     "noUnusedLocals": true,
+    "skipLibCheck": true,
     "preserveWatchOutput": true,
     "resolveJsonModule": true,
     "outDir": "lib",
