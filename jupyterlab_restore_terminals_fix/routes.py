@@ -1,8 +1,10 @@
+import hashlib
 import json
 import os
 import subprocess
 import sys
 
+from jupyter_core.paths import jupyter_data_dir
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 import tornado
@@ -230,6 +232,113 @@ class AllTerminalCwdsHandler(APIHandler):
         self.finish(json.dumps({"terminals": terminals}))
 
 
+def _state_file(server_root: str | None) -> str:
+    """Path to the persisted terminal-cwd state for this server root.
+
+    Keyed by a hash of the server root so distinct roots do not clobber
+    each other's terminal state.
+    """
+    root = os.path.realpath(os.path.expanduser(server_root or ""))
+    digest = hashlib.sha1(root.encode("utf-8")).hexdigest()[:12]
+    base = os.path.join(jupyter_data_dir(), "restore_terminals_fix")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, f"state-{digest}.json")
+
+
+def _load_state(server_root: str | None) -> dict:
+    path = _state_file(server_root)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_state(server_root: str | None, state: dict) -> None:
+    path = _state_file(server_root)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def prepopulate_terminals(server_app) -> None:
+    """Re-create saved terminals on server startup.
+
+    Runs before any frontend connects, so the built-in restore's
+    `terminal:create-new {name}` finds each session already running (and
+    `connectTo`s it) instead of starting a fresh shell at the root. This
+    is the only point where terminal cwd can be restored race-free - the
+    frontend WidgetTracker rewrites workspace entries with name-only data,
+    so client-side cwd injection cannot survive.
+    """
+    web_app = server_app.web_app
+    terminal_manager = web_app.settings.get("terminal_manager")
+    if terminal_manager is None:
+        return
+    server_root = web_app.settings.get("server_root_dir")
+    state = _load_state(server_root)
+    for name, cwd in state.items():
+        if name in terminal_manager.terminals:
+            continue
+        if not cwd or not os.path.isdir(cwd):
+            continue
+        try:
+            terminal_manager.create(name=name, cwd=cwd)
+            server_app.log.info(
+                "restore_terminals_fix: pre-created terminal %s at %s",
+                name,
+                cwd,
+            )
+        except Exception as exc:  # noqa: BLE001
+            server_app.log.warning(
+                "restore_terminals_fix: failed to pre-create %s: %s",
+                name,
+                exc,
+            )
+
+
+class TerminalStateHandler(APIHandler):
+    """Persist the cwds of the terminals the frontend reports as in-layout.
+
+    Body: {"names": ["1", "2", ...]}. The server resolves each running
+    terminal's current cwd and stores {name: cwd}, replacing the prior
+    state so closed-tab terminals drop off and never get pre-created.
+    """
+
+    @tornado.web.authenticated
+    async def post(self):
+        terminal_manager = self.settings.get("terminal_manager")
+        if terminal_manager is None:
+            self.set_status(503)
+            self.finish(json.dumps({"error": "Terminal service not available"}))
+            return
+
+        body = self.get_json_body() or {}
+        names = body.get("names") or []
+        state = {}
+        for name in names:
+            if name not in terminal_manager.terminals:
+                continue
+            terminal = terminal_manager.terminals[name]
+            ptyproc = getattr(terminal, "ptyproc", None)
+            if ptyproc is None:
+                continue
+            cwd = _get_process_cwd(ptyproc.pid)
+            if cwd and _is_valid_cwd(cwd):
+                state[name] = cwd
+
+        server_root = self.settings.get("server_root_dir")
+        _save_state(server_root, state)
+        self.finish(json.dumps({"saved": state}))
+
+
 def setup_route_handlers(web_app):
     host_pattern = ".*$"
     base_url = web_app.settings["base_url"]
@@ -240,9 +349,13 @@ def setup_route_handlers(web_app):
     cwds_pattern = url_path_join(
         base_url, "jupyterlab-restore-terminals-fix", "cwds"
     )
+    state_pattern = url_path_join(
+        base_url, "jupyterlab-restore-terminals-fix", "state"
+    )
 
     handlers = [
         (cwd_pattern, TerminalCwdHandler),
         (cwds_pattern, AllTerminalCwdsHandler),
+        (state_pattern, TerminalStateHandler),
     ]
     web_app.add_handlers(host_pattern, handlers)
