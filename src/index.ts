@@ -47,10 +47,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     'Restores terminal working directories after workspace restoration.',
   autoStart: true,
   requires: [ITerminalTracker],
-  activate: (
-    app: JupyterFrontEnd,
-    terminalTracker: ITerminalTracker
-  ): void => {
+  activate: (app: JupyterFrontEnd, terminalTracker: ITerminalTracker): void => {
     const serverSettings = app.serviceManager.serverSettings;
 
     // Restore is handled entirely server-side: the server pre-creates the
