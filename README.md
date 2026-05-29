@@ -9,7 +9,7 @@
 [![Donate PayPal](https://img.shields.io/badge/Donate-PayPal-blue?style=flat)](https://www.paypal.com/donate/?hosted_button_id=B4KPBJDLLXTSA)
 
 > [!TIP]
-> This extension is part of the [stellars_jupyterlab_extensions](https://github.com/stellarshenson/stellars_jupyterlab_extensions) metapackage. Install all Stellars extensions at once: `pip install stellars_jupyterlab_extensions`
+> This extension is part of the [stellars_jupyterlab_fixes](https://github.com/stellarshenson/stellars_jupyterlab_fixes) metapackage. Install all Stellars extensions at once: `pip install stellars_jupyterlab_fixes`
 
 Fix for the common JupyterLab problem where terminal windows lose their working directories after workspace restoration. When JupyterLab restores a saved workspace (after server restart, browser refresh, etc.), all terminals reopen pointing to the notebook root instead of their original locations. This extension remembers and restores each terminal's working directory.
 
