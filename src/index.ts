@@ -3,6 +3,8 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
+import { URLExt } from '@jupyterlab/coreutils';
+import { ServerConnection } from '@jupyterlab/services';
 import { IStateDB } from '@jupyterlab/statedb';
 import { ITerminalTracker } from '@jupyterlab/terminal';
 import { requestAPI } from './request';
@@ -25,7 +27,7 @@ interface ICwdMap {
 }
 
 async function fetchAllCwds(
-  serverSettings: any
+  serverSettings: ServerConnection.ISettings
 ): Promise<ICwdMap> {
   try {
     const data = await requestAPI<IAllTerminalCwdsResponse>(
@@ -44,7 +46,7 @@ async function fetchAllCwds(
 
 async function fetchTerminalCwd(
   terminalName: string,
-  serverSettings: any
+  serverSettings: ServerConnection.ISettings
 ): Promise<string | null> {
   try {
     const data = await requestAPI<ITerminalCwdResponse>(
@@ -69,6 +71,26 @@ async function loadCwds(stateDB: IStateDB): Promise<ICwdMap> {
   return {};
 }
 
+async function precreateTerminals(
+  savedCwds: ICwdMap,
+  serverSettings: ServerConnection.ISettings
+): Promise<void> {
+  const url = URLExt.join(serverSettings.baseUrl, 'api', 'terminals');
+  const requests = Object.entries(savedCwds).map(([name, cwd]) =>
+    ServerConnection.makeRequest(
+      url,
+      {
+        method: 'POST',
+        body: JSON.stringify({ name, cwd })
+      },
+      serverSettings
+    ).catch(() => {
+      // terminal may already exist (browser refresh) - that's fine
+    })
+  );
+  await Promise.all(requests);
+}
+
 const plugin: JupyterFrontEndPlugin<void> = {
   id: 'jupyterlab_restore_terminals_fix:plugin',
   description:
@@ -80,47 +102,25 @@ const plugin: JupyterFrontEndPlugin<void> = {
     app: JupyterFrontEnd,
     stateDB: IStateDB,
     terminalTracker: ITerminalTracker | null
-  ) => {
+  ): void => {
     if (!terminalTracker) {
-      console.warn(
-        'jupyterlab_restore_terminals_fix: ITerminalTracker not available'
-      );
       return;
     }
 
     const serverSettings = app.serviceManager.serverSettings;
 
-    // -- Restore phase: run once after workspace restore --
-    app.restored.then(async () => {
-      const savedCwds = await loadCwds(stateDB);
-      if (Object.keys(savedCwds).length === 0) {
-        return;
+    // -- Restore phase: fire-and-forget pre-creation --
+    // Don't await - activation must return immediately to avoid
+    // blocking JupyterLab startup. Pre-creation races workspace
+    // restore; if it wins, terminals open in saved cwds.
+    loadCwds(stateDB).then(savedCwds => {
+      if (Object.keys(savedCwds).length > 0) {
+        precreateTerminals(savedCwds, serverSettings);
       }
-
-      // Brief delay to let terminal sessions initialise
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      terminalTracker.forEach(widget => {
-        try {
-          const session = widget.content.session;
-          const name = session?.model?.name;
-          if (!name || !savedCwds[name]) {
-            return;
-          }
-          const targetCwd = savedCwds[name];
-          session.send({
-            type: 'stdin',
-            content: [`cd ${shellQuote(targetCwd)}\n`]
-          });
-        } catch {
-          // terminal may have been disposed
-        }
-      });
     });
 
     // -- Save phase: capture cwd on terminal open --
     terminalTracker.widgetAdded.connect((_sender, widget) => {
-      // Wait for terminal to initialise before querying cwd
       setTimeout(async () => {
         try {
           const name = widget.content.session?.model?.name;
@@ -154,9 +154,5 @@ const plugin: JupyterFrontEndPlugin<void> = {
     }, POLL_INTERVAL_MS);
   }
 };
-
-function shellQuote(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
-}
 
 export default plugin;

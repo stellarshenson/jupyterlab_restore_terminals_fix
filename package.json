@@ -1,6 +1,6 @@
 {
     "name": "jupyterlab_restore_terminals_fix",
-    "version": "0.6.4",
+    "version": "0.6.8",
     "description": "Jupyterlab fix in a form of extension for a common problem of restoring workspace after server restart etc... such that terminal windows are there, but they all were opened in the same location (notebook root). We'd like to have them opened in the locations where they were opened originally.",
     "keywords": [
         "jupyter",
