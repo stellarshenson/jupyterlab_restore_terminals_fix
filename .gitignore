@@ -129,3 +129,5 @@ dmypy.json
 
 # Project-local node environment
 .nodeenv/
+junit.xml
+uv.lock
