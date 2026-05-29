@@ -132,3 +132,4 @@ dmypy.json
 junit.xml
 uv.lock
 .claude/scheduled_tasks.lock
+.claude/scheduled_tasks.lock
