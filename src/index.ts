@@ -3,20 +3,17 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
-import { URLExt } from '@jupyterlab/coreutils';
-import { ServerConnection } from '@jupyterlab/services';
 import { IStateDB } from '@jupyterlab/statedb';
 import { ITerminalTracker } from '@jupyterlab/terminal';
 import { requestAPI } from './request';
 
-const TAG = '[restore-terminals-fix]';
-const PLUGIN_KEY = 'jupyterlab_restore_terminals_fix:terminal-cwds';
 const TERMINAL_NS = 'terminal';
 const POLL_INTERVAL_MS = 15000;
 
 interface ITerminalCwdResponse {
   terminal_name: string;
   cwd: string;
+  relative_cwd?: string;
   error?: string;
 }
 
@@ -24,21 +21,25 @@ interface IAllTerminalCwdsResponse {
   terminals: ITerminalCwdResponse[];
 }
 
-interface ICwdMap {
+interface IRelCwdMap {
   [terminalName: string]: string;
 }
 
-async function fetchAllCwds(
-  serverSettings: any
-): Promise<ICwdMap> {
+interface ITerminalWidgetData {
+  data: { name: string; cwd?: string };
+}
+
+async function fetchAllCwds(serverSettings: any): Promise<IRelCwdMap> {
   try {
     const data = await requestAPI<IAllTerminalCwdsResponse>(
       'cwds',
       serverSettings
     );
-    const map: ICwdMap = {};
+    const map: IRelCwdMap = {};
     for (const entry of data.terminals) {
-      map[entry.terminal_name] = entry.cwd;
+      if (entry.relative_cwd) {
+        map[entry.terminal_name] = entry.relative_cwd;
+      }
     }
     return map;
   } catch {
@@ -46,7 +47,7 @@ async function fetchAllCwds(
   }
 }
 
-async function fetchTerminalCwd(
+async function fetchTerminalRelCwd(
   terminalName: string,
   serverSettings: any
 ): Promise<string | null> {
@@ -55,64 +56,42 @@ async function fetchTerminalCwd(
       `cwd/${terminalName}`,
       serverSettings
     );
-    return data.cwd || null;
+    return data.relative_cwd || null;
   } catch {
     return null;
   }
 }
 
-async function precreateTerminals(
-  cwds: ICwdMap,
-  serverSettings: ServerConnection.ISettings
+/**
+ * Patch the workspace entry for a terminal with its server-root-relative
+ * cwd. The built-in terminal:create-new command reads this on the next
+ * workspace restore and reopens the terminal in that directory.
+ *
+ * Patch-only: if the `terminal:<name>` entry does not already exist
+ * (terminal not part of the current workspace layout) we skip it. That
+ * keeps us from creating ghost entries in the Running Terminals sidebar
+ * and naturally isolates per-workspace state (IStateDB is per-workspace).
+ */
+async function patchTerminalCwd(
+  stateDB: IStateDB,
+  name: string,
+  relativeCwd: string
 ): Promise<void> {
-  const url = URLExt.join(serverSettings.baseUrl, 'api', 'terminals');
-  const requests = Object.entries(cwds).map(([name, cwd]) =>
-    ServerConnection.makeRequest(
-      url,
-      { method: 'POST', body: JSON.stringify({ name, cwd }) },
-      serverSettings
-    )
-      .then(resp => {
-        console.log(
-          `${TAG} pre-created terminal ${name} cwd=${cwd} status=${resp.status}`
-        );
-      })
-      .catch(() => {
-        console.log(`${TAG} pre-create failed for ${name} (may exist)`);
-      })
-  );
-  await Promise.all(requests);
-}
-
-async function getLayoutTerminalNames(
-  stateDB: IStateDB
-): Promise<Set<string>> {
-  const names = new Set<string>();
-  const layout = (await stateDB.fetch(
-    'layout-restorer:data'
-  )) as any;
-  if (!layout) {
-    return names;
-  }
-  const collect = (node: any) => {
-    if (!node) {
+  const key = `${TERMINAL_NS}:${name}`;
+  try {
+    const existing = await stateDB.fetch(key);
+    if (!existing) {
       return;
     }
-    const widgets: string[] = node.widgets || [];
-    for (const w of widgets) {
-      if (w.startsWith(`${TERMINAL_NS}:`)) {
-        names.add(w.replace(`${TERMINAL_NS}:`, ''));
-      }
+    const widgetData = existing as unknown as ITerminalWidgetData;
+    if (widgetData.data.cwd === relativeCwd) {
+      return;
     }
-    if (node.children) {
-      for (const child of node.children) {
-        collect(child);
-      }
-    }
-  };
-  collect(layout.main?.dock);
-  collect(layout.down);
-  return names;
+    widgetData.data.cwd = relativeCwd;
+    await stateDB.save(key, widgetData as any);
+  } catch {
+    // ignore stateDB errors
+  }
 }
 
 const plugin: JupyterFrontEndPlugin<void> = {
@@ -127,63 +106,20 @@ const plugin: JupyterFrontEndPlugin<void> = {
     stateDB: IStateDB,
     terminalTracker: ITerminalTracker | null
   ): void => {
-    console.log(`${TAG} activate called`);
     if (!terminalTracker) {
       return;
     }
 
     const serverSettings = app.serviceManager.serverSettings;
 
-    // -- Restore phase --
-    // Pre-create terminals with saved cwds after all plugins activate
-    // but BEFORE layout restorer replays commands. app.started resolves
-    // after all plugin activate() calls complete. The layout restorer
-    // waits for app.started + its own promise chain, so pre-creation
-    // runs first.
-    app.started.then(async () => {
-      console.log(`${TAG} app.started - beginning pre-creation`);
-      const layoutNames = await getLayoutTerminalNames(stateDB);
-      console.log(
-        `${TAG} layout terminals: ${[...layoutNames].join(', ')}`
-      );
+    // Restore is handled by the built-in terminal plugin: it reads the
+    // cwd we keep patched into each terminal:<name> workspace entry and
+    // reopens the terminal there. No restore-phase code needed here.
 
-      const data = await stateDB.fetch(PLUGIN_KEY);
-      if (!data) {
-        console.log(`${TAG} no saved cwds`);
-        return;
-      }
-      const allCwds = data as unknown as ICwdMap;
-
-      // Only pre-create terminals that are in the layout
-      const toRestore: ICwdMap = {};
-      for (const name of layoutNames) {
-        if (allCwds[name]) {
-          toRestore[name] = allCwds[name];
-        }
-      }
-
-      // Clean stale entries
-      const cleaned: ICwdMap = {};
-      for (const name of layoutNames) {
-        if (allCwds[name]) {
-          cleaned[name] = allCwds[name];
-        }
-      }
-      await stateDB.save(PLUGIN_KEY, cleaned as any);
-      console.log(
-        `${TAG} cleaned cwds to layout-only: ${JSON.stringify(cleaned)}`
-      );
-
-      if (Object.keys(toRestore).length > 0) {
-        await precreateTerminals(toRestore, serverSettings);
-      }
-    }).catch(err => {
-      console.warn(`${TAG} restore error:`, err);
-    });
-
-    // -- Save phase: capture cwd on terminal open --
+    // -- Save phase: capture cwd shortly after a terminal opens --
+    // Retries because the pty child shell may not have spawned yet at
+    // widget-creation time, so /proc cwd is not ready immediately.
     terminalTracker.widgetAdded.connect((_sender, widget) => {
-      console.log(`${TAG} widgetAdded fired, id=${widget.id}`);
       const delays = [2000, 4000, 8000];
       for (const delay of delays) {
         setTimeout(() => {
@@ -194,16 +130,10 @@ const plugin: JupyterFrontEndPlugin<void> = {
           if (!name) {
             return;
           }
-          fetchTerminalCwd(name, serverSettings)
-            .then(async cwd => {
-              console.log(`${TAG} [${delay}ms] ${name} cwd=${cwd}`);
-              if (cwd) {
-                const existing =
-                  ((await stateDB.fetch(
-                    PLUGIN_KEY
-                  )) as unknown as ICwdMap) || {};
-                existing[name] = cwd;
-                await stateDB.save(PLUGIN_KEY, existing as any);
+          fetchTerminalRelCwd(name, serverSettings)
+            .then(rel => {
+              if (rel) {
+                return patchTerminalCwd(stateDB, name, rel);
               }
             })
             .catch(() => {});
@@ -211,21 +141,12 @@ const plugin: JupyterFrontEndPlugin<void> = {
       }
     });
 
-    // -- Save phase: periodic poll --
+    // -- Save phase: periodic poll to track cd between opens --
     setInterval(async () => {
       try {
         const cwds = await fetchAllCwds(serverSettings);
-        if (Object.keys(cwds).length > 0) {
-          const layoutNames = await getLayoutTerminalNames(stateDB);
-          const existing =
-            ((await stateDB.fetch(PLUGIN_KEY)) as unknown as ICwdMap) ||
-            {};
-          // Only keep terminals that are in the layout
-          const merged: ICwdMap = {};
-          for (const name of layoutNames) {
-            merged[name] = cwds[name] || existing[name] || '';
-          }
-          await stateDB.save(PLUGIN_KEY, merged as any);
+        for (const [name, rel] of Object.entries(cwds)) {
+          await patchTerminalCwd(stateDB, name, rel);
         }
       } catch {
         // ignore polling errors

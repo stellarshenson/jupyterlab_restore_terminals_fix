@@ -149,7 +149,32 @@ def _get_process_cwd(pid: int) -> str | None:
     return _try_get_cwd(pid)
 
 
-def _get_terminal_cwd(terminal_manager, terminal_name: str) -> dict:
+def _to_relative_cwd(cwd: str, server_root: str | None) -> str | None:
+    """Express cwd relative to the server root.
+
+    The built-in terminal:create-new command runs the stored cwd through
+    contents.localPath() which strips the leading slash of an absolute
+    path, so an absolute cwd ends up double-prefixed with the server root
+    and the terminal silently opens at root. A path already relative to
+    the server root survives that round-trip. Returns None when cwd is
+    the root itself (nothing to restore) or lives outside the root
+    (cannot be expressed relative to it).
+    """
+    if not server_root:
+        return None
+    root = os.path.realpath(os.path.expanduser(server_root))
+    target = os.path.realpath(cwd)
+    if target == root:
+        return None
+    rel = os.path.relpath(target, root)
+    if rel.startswith(".."):
+        return None
+    return rel
+
+
+def _get_terminal_cwd(
+    terminal_manager, terminal_name: str, server_root: str | None = None
+) -> dict:
     # Check if terminal exists without auto-creating it
     if terminal_name not in terminal_manager.terminals:
         return {"terminal_name": terminal_name, "error": "not found"}
@@ -163,7 +188,11 @@ def _get_terminal_cwd(terminal_manager, terminal_name: str) -> dict:
     if cwd is None:
         return {"terminal_name": terminal_name, "error": "cwd unavailable"}
 
-    return {"terminal_name": terminal_name, "cwd": cwd}
+    result = {"terminal_name": terminal_name, "cwd": cwd}
+    relative = _to_relative_cwd(cwd, server_root)
+    if relative is not None:
+        result["relative_cwd"] = relative
+    return result
 
 
 class TerminalCwdHandler(APIHandler):
@@ -175,7 +204,8 @@ class TerminalCwdHandler(APIHandler):
             self.finish(json.dumps({"error": "Terminal service not available"}))
             return
 
-        result = _get_terminal_cwd(terminal_manager, terminal_name)
+        server_root = self.settings.get("server_root_dir")
+        result = _get_terminal_cwd(terminal_manager, terminal_name, server_root)
         if "error" in result:
             self.set_status(404 if result["error"] == "not found" else 500)
         self.finish(json.dumps(result))
@@ -190,9 +220,10 @@ class AllTerminalCwdsHandler(APIHandler):
             self.finish(json.dumps({"error": "Terminal service not available"}))
             return
 
+        server_root = self.settings.get("server_root_dir")
         terminals = []
         for name in list(terminal_manager.terminals.keys()):
-            result = _get_terminal_cwd(terminal_manager, name)
+            result = _get_terminal_cwd(terminal_manager, name, server_root)
             if "cwd" in result:
                 terminals.append(result)
 
