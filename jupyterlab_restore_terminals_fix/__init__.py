@@ -23,6 +23,20 @@ def _jupyter_server_extension_points():
     }]
 
 
+def _workspaces_dir(server_app) -> str | None:
+    """The saved-workspaces folder of the loaded JupyterLab, else its default."""
+    # All extensions are linked (configured) before any is loaded
+    lab_apps = server_app.extension_manager.extension_apps.get("jupyterlab", set())
+    for app in lab_apps:
+        if getattr(app, "workspaces_dir", None):
+            return app.workspaces_dir
+    try:
+        from jupyterlab.commands import get_workspaces_dir
+    except ImportError:
+        return None
+    return get_workspaces_dir()
+
+
 def _load_jupyter_server_extension(server_app):
     """Registers the API handler to receive HTTP requests from the frontend extension.
 
@@ -31,6 +45,9 @@ def _load_jupyter_server_extension(server_app):
     server_app: jupyterlab.labapp.LabApp
         JupyterLab application instance
     """
+    server_app.web_app.settings["restore_terminals_fix_workspaces_dir"] = (
+        _workspaces_dir(server_app)
+    )
     setup_route_handlers(server_app.web_app)
     name = "jupyterlab_restore_terminals_fix"
     server_app.log.info(f"Registered {name} server extension")

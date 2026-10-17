@@ -12,6 +12,8 @@ from jupyterlab.galata import configure_jupyter_server
 configure_jupyter_server(c)
 # Keep the test server out of the developer's ~/.jupyter/lab/user-settings
 c.LabApp.user_settings_dir = mkdtemp(prefix="galata-settings-")
+# The extension writes its state file under jupyter_data_dir()
+os.environ["JUPYTER_DATA_DIR"] = mkdtemp(prefix="galata-data-")
 # `or`, not a get() default: an exported-but-empty value would raise ValueError
 c.ServerApp.port = int(os.environ.get("JUPYTER_TEST_PORT") or "8888")
 # A startup tab other than the Launcher hangs galata's readiness wait. Ignored

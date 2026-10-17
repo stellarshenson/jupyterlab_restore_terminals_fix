@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -38,16 +39,20 @@ def _get_direct_children(parent_pid: int) -> list[int]:
     children = []
     try:
         if sys.platform == "linux":
-            children_file = f"/proc/{parent_pid}/task/{parent_pid}/children"
-            if os.path.exists(children_file):
-                with open(children_file, "r") as f:
-                    for child in f.read().strip().split():
-                        try:
-                            children.append(int(child))
-                        except ValueError:
-                            pass
-
-        if not children:
+            # Each thread's file lists only the children that thread forked
+            task_dir = f"/proc/{parent_pid}/task"
+            for tid in os.listdir(task_dir):
+                try:
+                    with open(f"{task_dir}/{tid}/children", "r") as f:
+                        tokens = f.read().split()
+                except OSError:
+                    continue
+                for child in tokens:
+                    try:
+                        children.append(int(child))
+                    except ValueError:
+                        pass
+        else:
             result = subprocess.run(
                 ["pgrep", "-P", str(parent_pid)],
                 capture_output=True,
@@ -62,7 +67,7 @@ def _get_direct_children(parent_pid: int) -> list[int]:
                         pass
     except Exception:
         pass
-    return children
+    return list(dict.fromkeys(children))
 
 
 def _collect_process_tree(pid: int, depth: int, results: list) -> None:
@@ -174,7 +179,7 @@ def _to_relative_cwd(cwd: str, server_root: str | None) -> str | None:
     return rel
 
 
-def _get_terminal_cwd(
+async def _get_terminal_cwd(
     terminal_manager, terminal_name: str, server_root: str | None = None
 ) -> dict:
     # Check if terminal exists without auto-creating it
@@ -186,7 +191,9 @@ def _get_terminal_cwd(
     if ptyproc is None:
         return {"terminal_name": terminal_name, "error": "no process"}
 
-    cwd = _get_process_cwd(ptyproc.pid)
+    cwd = await asyncio.get_running_loop().run_in_executor(
+        None, _get_process_cwd, ptyproc.pid
+    )
     if cwd is None:
         return {"terminal_name": terminal_name, "error": "cwd unavailable"}
 
@@ -207,7 +214,9 @@ class TerminalCwdHandler(APIHandler):
             return
 
         server_root = self.settings.get("server_root_dir")
-        result = _get_terminal_cwd(terminal_manager, terminal_name, server_root)
+        result = await _get_terminal_cwd(
+            terminal_manager, terminal_name, server_root
+        )
         if "error" in result:
             self.set_status(404 if result["error"] == "not found" else 500)
         self.finish(json.dumps(result))
@@ -225,7 +234,7 @@ class AllTerminalCwdsHandler(APIHandler):
         server_root = self.settings.get("server_root_dir")
         terminals = []
         for name in list(terminal_manager.terminals.keys()):
-            result = _get_terminal_cwd(terminal_manager, name, server_root)
+            result = await _get_terminal_cwd(terminal_manager, name, server_root)
             if "cwd" in result:
                 terminals.append(result)
 
@@ -268,6 +277,30 @@ def _save_state(server_root: str | None, state: dict) -> None:
         pass
 
 
+def _workspace_terminal_names(workspaces_dir: str | None) -> set[str]:
+    """Names of the terminals held in the layout of any saved workspace."""
+    names = set()
+    try:
+        entries = os.listdir(workspaces_dir) if workspaces_dir else []
+    except OSError:
+        return names
+    for entry in entries:
+        if not entry.endswith(".jupyterlab-workspace"):
+            continue
+        try:
+            with open(os.path.join(workspaces_dir, entry), "r") as f:
+                workspace = json.load(f)
+        except (OSError, ValueError):
+            continue
+        data = workspace.get("data") if isinstance(workspace, dict) else None
+        if not isinstance(data, dict):
+            continue
+        for key in data:
+            if key.startswith("terminal:"):
+                names.add(key[len("terminal:"):])
+    return names
+
+
 def prepopulate_terminals(server_app) -> None:
     """Re-create saved terminals on server startup.
 
@@ -307,9 +340,10 @@ def prepopulate_terminals(server_app) -> None:
 class TerminalStateHandler(APIHandler):
     """Persist the cwds of the terminals the frontend reports as in-layout.
 
-    Body: {"names": ["1", "2", ...]}. The server resolves each running
-    terminal's current cwd and stores {name: cwd}, replacing the prior
-    state so closed-tab terminals drop off and never get pre-created.
+    Body: {"names": ["1", "2", ...]}. The server adds the terminals held in
+    any saved workspace layout, resolves each running terminal's current
+    cwd and stores {name: cwd}, replacing the prior state so closed-tab
+    terminals in no workspace drop off and never get pre-created.
     """
 
     @tornado.web.authenticated
@@ -322,19 +356,38 @@ class TerminalStateHandler(APIHandler):
 
         body = self.get_json_body() or {}
         names = body.get("names") or []
+        loop = asyncio.get_running_loop()
+        # Terminals in another saved workspace's layout have no open page
+        # to report them, so they would drop off and reopen at the root
+        workspace_names = await loop.run_in_executor(
+            None,
+            _workspace_terminal_names,
+            self.settings.get("restore_terminals_fix_workspaces_dir"),
+        )
         state = {}
-        for name in names:
-            if name not in terminal_manager.terminals:
-                continue
-            terminal = terminal_manager.terminals[name]
-            ptyproc = getattr(terminal, "ptyproc", None)
-            if ptyproc is None:
-                continue
-            cwd = _get_process_cwd(ptyproc.pid)
+        server_root = self.settings.get("server_root_dir")
+        previous = _load_state(server_root)
+        for name in dict.fromkeys([*names, *sorted(workspace_names)]):
+            cwd = None
+            terminal = terminal_manager.terminals.get(name)
+            ptyproc = None
+            if terminal is not None:
+                ptyproc = getattr(terminal, "ptyproc", None)
+            if ptyproc is not None:
+                # The /proc walk blocks; on the event loop it stalls every
+                # terminal's I/O. terminal_manager stays on this thread.
+                cwd = await loop.run_in_executor(
+                    None, _get_process_cwd, ptyproc.pid
+                )
             if cwd and _is_valid_cwd(cwd):
                 state[name] = cwd
+            elif name in workspace_names:
+                # ACC-REOPEN-5: the workspace still holds it, so keep its
+                # last folder even while its process is not running.
+                old = previous.get(name)
+                if isinstance(old, str) and _is_valid_cwd(old):
+                    state[name] = old
 
-        server_root = self.settings.get("server_root_dir")
         _save_state(server_root, state)
         self.finish(json.dumps({"saved": state}))
 

@@ -16,6 +16,7 @@ const POLL_INTERVAL_MS = 15000;
  * connects to them already in the right directory. We send only the
  * tracker's terminals (i.e. those with a live widget / open tab) so
  * closed-tab sessions are not restored and do not become ghost entries.
+ * An empty list is sent too, so closing the last tab clears its entry.
  */
 async function reportLayoutTerminals(
   terminalTracker: ITerminalTracker,
@@ -28,9 +29,6 @@ async function reportLayoutTerminals(
       names.push(name);
     }
   });
-  if (names.length === 0) {
-    return;
-  }
   try {
     await requestAPI('state', serverSettings, {
       method: 'POST',

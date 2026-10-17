@@ -7,3 +7,5 @@ jupyterlab_restore_terminals_fix
 .claude
 eslint.config.mjs
 .venv
+docs/acc-crit*.md
+docs/defects*.md

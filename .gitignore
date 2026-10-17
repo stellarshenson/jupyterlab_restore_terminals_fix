@@ -3,6 +3,7 @@ lib/
 node_modules/
 *.log
 logs/
+tmp/
 .eslintcache
 .stylelintcache
 *.egg-info/
