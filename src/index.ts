@@ -48,6 +48,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [ITerminalTracker],
   activate: (app: JupyterFrontEnd, terminalTracker: ITerminalTracker): void => {
+    console.log(
+      'JupyterLab extension jupyterlab_restore_terminals_fix is activated!'
+    );
     const serverSettings = app.serviceManager.serverSettings;
 
     // Restore is handled entirely server-side: the server pre-creates the
